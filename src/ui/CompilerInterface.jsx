@@ -100,6 +100,9 @@ export function CompilerInterface() {
               <select className="input" value={provider} onChange={e => setProvider(e.target.value)}>
                 <option value="gemini">Google Gemini 2.0 Flash</option>
                 <option value="gemma">Google Gemma 4 26B</option>
+                <option value="gemini-embedding">Gemini 1.5 Flash</option>
+                <option value="gemini-3-flash">Gemini 3 Flash Live</option>
+                <option value="gemini-3-flash-lite">Gemini 3.1 Flash Lite</option>
                 <option value="groq">Groq (Llama 3.1 8B — fast)</option>
               </select>
             </div>
