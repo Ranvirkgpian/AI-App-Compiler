@@ -9,6 +9,9 @@
 const PROVIDERS = {
   GEMINI: 'gemini',
   GEMMA: 'gemma',
+  GEMINI_EMBEDDING: 'gemini-embedding',
+  GEMINI_3_FLASH: 'gemini-3-flash',
+  GEMINI_3_FLASH_LITE: 'gemini-3-flash-lite',
   GROQ: 'groq',
 };
 
@@ -111,6 +114,51 @@ function extractJsonFromGemmaResponse(text) {
   }
 
   return cleaned;
+}
+
+/**
+ * Attempt to repair common JSON issues from LLM output:
+ * - Trailing commas before ] or }
+ * - Missing commas between array elements or object properties
+ * - Unescaped newlines inside strings
+ * - Truncated JSON (close any open brackets)
+ */
+function repairJson(text) {
+  if (!text) return text;
+  let s = text;
+
+  // 1. Remove trailing commas before closing brackets: ,] or ,}
+  s = s.replace(/,\s*([\]\}])/g, '$1');
+
+  // 2. Add missing commas between } { or ] [ or "value" "key" patterns
+  s = s.replace(/\}\s*\{/g, '},{');
+  s = s.replace(/\]\s*\[/g, '],[')
+  s = s.replace(/("\s*)\n(\s*")/g, '$1,$2');
+
+  // 3. Fix missing commas after values before a new key: value\n"key"
+  s = s.replace(/(\d|true|false|null)\s*\n(\s*")/gi, '$1,$2');
+  s = s.replace(/"\s*\n(\s*")/g, '",$1');
+
+  // 4. Close unclosed brackets/braces
+  let openBraces = 0, openBrackets = 0;
+  let inStr = false, esc = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (esc) { esc = false; continue; }
+    if (c === '\\' && inStr) { esc = true; continue; }
+    if (c === '"') { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (c === '{') openBraces++;
+    else if (c === '}') openBraces--;
+    else if (c === '[') openBrackets++;
+    else if (c === ']') openBrackets--;
+  }
+  // Remove any trailing comma before we close
+  s = s.replace(/,\s*$/, '');
+  while (openBrackets > 0) { s += ']'; openBrackets--; }
+  while (openBraces > 0) { s += '}'; openBraces--; }
+
+  return s;
 }
 
 /**
@@ -313,6 +361,12 @@ export async function callLLM({
         result = await callGemini(apiKey, prompt, systemPrompt, jsonSchema, temperature);
       } else if (provider === PROVIDERS.GEMMA) {
         result = await callGemini(apiKey, prompt, systemPrompt, jsonSchema, temperature, 'gemma-4-26b-a4b-it');
+      } else if (provider === PROVIDERS.GEMINI_EMBEDDING) {
+        result = await callGemini(apiKey, prompt, systemPrompt, jsonSchema, temperature, 'gemini-1.5-flash');
+      } else if (provider === PROVIDERS.GEMINI_3_FLASH) {
+        result = await callGemini(apiKey, prompt, systemPrompt, jsonSchema, temperature, 'gemini-3-flash-preview');
+      } else if (provider === PROVIDERS.GEMINI_3_FLASH_LITE) {
+        result = await callGemini(apiKey, prompt, systemPrompt, jsonSchema, temperature, 'gemini-3.1-flash-lite-preview');
       } else if (provider === PROVIDERS.GROQ) {
         result = await callGroq(apiKey, prompt, systemPrompt, jsonSchema, temperature, stageName);
       } else {
@@ -321,22 +375,35 @@ export async function callLLM({
 
       const latencyMs = Date.now() - startTime;
 
-      // Parse JSON
+      // Parse JSON with progressive repair
       let parsed;
       try {
         parsed = JSON.parse(result.text);
       } catch (parseErr) {
-        // Try to extract JSON from the response (handles any remaining wrapper text)
+        // Step 1: Extract JSON from wrapper text (code fences, thinking tags)
         const extracted = extractJsonFromGemmaResponse(result.text);
         try {
           parsed = JSON.parse(extracted);
         } catch {
-          // Last resort: find any JSON object in the text
-          const jsonMatch = result.text.match(/\{[\s\S]*\}/);
-          if (jsonMatch) {
-            parsed = JSON.parse(jsonMatch[0]);
-          } else {
-            throw new Error(`Failed to parse JSON from LLM response: ${parseErr.message}\nRaw (first 200 chars): ${result.text.slice(0, 200)}`);
+          // Step 2: Attempt to repair common JSON issues
+          try {
+            const repaired = repairJson(extracted);
+            parsed = JSON.parse(repaired);
+            console.log(`[LLM] JSON repaired successfully for ${stageName}`);
+          } catch {
+            // Step 3: Find any JSON object in the raw text and repair it
+            const jsonMatch = result.text.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+              try {
+                parsed = JSON.parse(jsonMatch[0]);
+              } catch {
+                const repaired = repairJson(jsonMatch[0]);
+                parsed = JSON.parse(repaired);
+                console.log(`[LLM] JSON extracted and repaired for ${stageName}`);
+              }
+            } else {
+              throw new Error(`Failed to parse JSON from LLM response: ${parseErr.message}\nRaw (first 200 chars): ${result.text.slice(0, 200)}`);
+            }
           }
         }
       }
